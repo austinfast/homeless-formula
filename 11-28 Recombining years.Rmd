@@ -1,0 +1,139 @@
+---
+title: "Adding up 2011-2020"
+author: "Austin Fast"
+date: "11/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(janitor)
+```
+
+Sum up 2011-2020 hypothetical amounts
+```{r}
+esg2011 <- read.csv ("data/outputs/simpleshare_final/compare11_simpleshares.csv") %>% 
+  mutate (X = 2011)
+esg2012 <- read.csv ("data/outputs/simpleshare_final/compare12_simpleshares.csv") %>% 
+  mutate (X = 2012)
+esg2013 <- read.csv ("data/outputs/simpleshare_final/compare13_simpleshares.csv") %>% 
+  mutate (X = 2013)
+esg2014 <- read.csv ("data/outputs/simpleshare_final/compare14_simpleshares.csv") %>% 
+  mutate (X = 2014)
+esg2015 <- read.csv ("data/outputs/simpleshare_final/compare15_simpleshares.csv") %>% 
+  mutate (X = 2015)
+esg2016 <- read.csv ("data/outputs/simpleshare_final/compare16_simpleshares.csv") %>% 
+  mutate (X = 2016)
+esg2017 <- read.csv ("data/outputs/simpleshare_final/compare17_simpleshares.csv") %>% 
+  mutate (X = 2017)
+esg2018 <- read.csv ("data/outputs/simpleshare_final/compare18_simpleshares.csv") %>% 
+  mutate (X = 2018)
+esg2019 <- read.csv ("data/outputs/simpleshare_final/compare19_simpleshares.csv") %>% 
+  mutate (X = 2019)
+esg2020 <- read.csv ("data/outputs/simpleshare_final/compare20_simpleshares.csv") %>% 
+  mutate (X = 2020)
+
+final <- esg2020 %>% 
+  rbind (esg2019) %>% 
+  rbind (esg2018) %>% 
+  rbind (esg2017) %>% 
+  rbind (esg2016) %>% 
+  rbind (esg2015) %>% 
+  rbind (esg2014) %>% 
+  rbind (esg2013) %>% 
+  rbind (esg2012) %>% 
+  rbind (esg2011) %>%
+  rename (year = X) %>%
+  mutate (UOGID = as.character (UOGID),
+    UOGID = case_when (
+    name == "District Of Columbia" ~ "110006", 
+    name == "WASHINGTON" ~ "110006", 
+    TRUE ~ UOGID))
+
+final$UOGID <- str_pad(final$UOGID, 6, pad = "0")
+
+summed <- final %>%
+  group_by (UOGID) %>%
+  mutate (t_actual = sum(allocation, na.rm=T),
+          t_mine = sum(my_formula, na.rm=T),
+          t_rollup = sum(rolled_up, na.rm=T),
+          count = n()) %>%
+  distinct(UOGID, .keep_all = TRUE)
+  
+final2 <- summed %>% 
+  mutate (formula_diff = (t_mine - t_actual),
+          pct_diff = ((formula_diff / t_actual)*100),
+          rollup_diff = (t_rollup - t_actual),
+          pct_diff_rollup = (rollup_diff / t_actual)*100) %>%
+  dplyr::select (2,3,10:12, 6,7,14,9,1,13)
+
+#write.csv (final2, "data/outputs/simpleshare_final/final_pprns.csv")
+
+# How many places had money rolled up all 10 years? 81 (+4 insular areas)
+# Which states had the most of these cities? Penn (15), NY (11), then MI, IL, IN & PR tied with 6 each
+final2 %>% 
+  filter (pct_diff_rollup == -100) %>%
+  mutate (state = substr(UOGID, 1, 2)) %>%
+  group_by (state) %>%
+  count (state) %>% 
+  arrange (desc(n))
+
+# How many places had money rolled up at least once in the decade? 128, an additional 47
+final %>% 
+  filter (rolled_up == 0) %>% 
+  distinct (UOGID, .keep_all = TRUE)
+```
+
+```{r}
+#How much did each state get?
+library(tidycensus)
+fips <- fips_codes %>% 
+  distinct (state_code, .keep_all=T) 
+
+compare <- final2 %>% 
+  mutate (state = substr(UOGID, 1,2))
+
+compare2 <- compare %>%
+  group_by (state) %>%
+  summarize (new_formula_2011_2020 = sum(t_mine),
+             actual_allocation_2011_2020 = sum(t_actual)) %>%
+  mutate (diff = new_formula_2011_2020 - actual_allocation_2011_2020,
+          pct_change = diff / actual_allocation_2011_2020 *100) %>% 
+  left_join (fips, by = c("state" = "state_code")) %>%
+  select(state_name, new_formula_2011_2020, actual_allocation_2011_2020, diff, pct_change) %>% 
+  arrange (desc(diff))
+
+write.csv (compare2, "data/outputs/state_total_comparison.csv")
+
+final3 <- compare %>% 
+  left_join (fips, by=c("state" = "state_code")) %>% 
+  select (-c(state, state.y, county_code, county))
+
+write.csv (final3, "data/outputs/simpleshare_final/final_pprns.csv")
+
+```
+
+How much did the PPRN method change the outcome?
+```{r}
+mapping_method <- read.csv ("data/outputs/final2.csv")
+
+final3 <- final2 %>%
+  select (c(1,2,5,8,9,10)) %>% 
+  rename (prn_total = t_rollup,
+          prn_rollup = rollup_diff,
+          prn_roll_pct = pct_diff_rollup)
+
+map2 <- mapping_method %>%
+  select (c(2,3,6,9,10,11))
+map2$UOGID <- str_pad(map2$UOGID, 6, pad="0")
+
+compare <- final3 %>%
+  full_join (map2, by = "UOGID") %>% 
+  mutate (method_diff = prn_total - t_rollup,
+          pct_change = abs (method_diff/ t_rollup * 100))
+
+mean(compare$pct_change, na.rm=T)
+write.csv (compare, "data/outputs/simpleshare_final/compare_methods.csv")
+```

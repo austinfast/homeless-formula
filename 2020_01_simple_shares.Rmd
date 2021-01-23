@@ -1,0 +1,388 @@
+---
+title: "Using PPRN numbers to create COC to ESG crosswalk"
+author: "Austin Fast"
+date: "11/24/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(readxl)
+```
+
+## Goal
+HUD used ESG funding amounts to divide PIT counts from the COC geography into ESG geography. 
+I can calculate ESG funding amounts for the ~1,200 ESG- & CDBG-eligible places from the CDBG18 allocations in HUD's workbook, but that leaves ~2,900 counties in balance of state areas without an ESG funding amount.
+
+HUD's PPRN (Preliminary Pro Rata Need) is another formula program derived directly from the CDBG formula and makes the calculations available online each year for all ~4,100 unique cities and counties in the HUD CDBG/ESG geographies.
+
+This program uses the available PPRN figures and converts them to the approximate ESG funding amounts for the nonentitlement areas since both programs are based on the same underlying CDBG formula.
+
+## PPRN Formula Mechanics
+After a 0.2% setaside for insular areas, 75% of the total PPRN allocation goes to ESG entitled places and 25% goes to places that do not get direct ESG funding (which may be CDBG-eligible cities, urban counties or non-entitled counties within the balance of state area). Source: [Federal Register](https://www.govinfo.gov/content/pkg/FR-2016-07-25/pdf/2016-17567.pdf)
+
+## Sources 
+* FY2019 Continuum of Care (CoC) Geographic Code Report
+https://files.hudexchange.info/resources/documents/FY-2019-Geographic-Codes-with-PPRN.pdf
+* FY2019 HUD funding allocation
+https://www.hud.gov/program_offices/comm_planning/budget/fy19
+* FY2018 CDBG calculation workbook (emailed from HUD)
+* 2020 Aggregated COC to ESG crosswalk (emailed from HUD)
+* 2020 Disaggregated COC to ESG crosswalk (emailed from HUD)
+
+## Ingest sources
+I converted the 2018 Continuum of Care (CoC) Geographic Code Report to a CSV using Tabula.
+This code imports that file and also import's HUD's 2020 crosswalk with their calculated ESG funding amounts based on the CDBG formula.
+```{r}
+pprn_df <- read.csv("data/inputs/hud_allocations/FY-2019-Geographic-Codes-with-PPRN.csv") %>%
+  clean_names() %>% 
+  rename (UOGID = code,
+          pprn_2 = pprn)
+
+#Convert factor columns into character/numeric to be able to mutate later. Add "0" pad to all HUD keys (UOGID) to ensure they are six digits long and match properly later.
+#Remove dollar signs and commas and extra pprn column
+pprn_df$UOGID <- str_pad (pprn_df$UOGID, 6, pad = "0")
+pprn_df$pprn_2 <- as.character (pprn_df$pprn_2)
+#remove $ and ,
+pprn_df$pprn = as.numeric(gsub("[\\$,]", "", pprn_df$pprn_2))
+pprn_df <- pprn_df %>%
+  select (-pprn_2)
+
+#Import disaggregated crosswalk of all 4141 jurisdictions
+crosswalk <- read_excel("data/inputs/hud_calculations/Disaggregated COC to ESG crosswalk.xlsx") %>%
+  clean_names() %>% 
+  rename (UOGID = geocode,
+          coc_num = coc_id)
+
+#Check for missing from PPRN file and check it read right from PDF
+anti_join (crosswalk, pprn_df, by = "UOGID") 
+
+#Check for missing from crosswalk file -- this will be those areas without CoCs (several places in AL, FL, & OK), insular areas and a few cities that have with joint agreements with their county that HUD didn't include (Marco Island, Naples, Commerce City, Pinellas Park).
+#Hard code these in above
+anti_join (pprn_df, crosswalk, by = "UOGID") %>%
+  filter(!(UOGID %in% c("129003", "129029", "129125", "010072", "010882", "019015", "019019","019049","019055","050930","059033","059047","059083","059113","059127","059131", "409087","409149"))) %>% #filter out non-COC counties in AL, AR, FL, OK
+  filter(!(state %in% c("AS","GU","MP","VI"))) #filter out insular areas 
+
+#Import disaggregated crosswalk of all 4141 jurisdictions and correct with places found above
+crosswalk <- read_excel("data/inputs/hud_calculations/Disaggregated COC to ESG crosswalk.xlsx") %>%
+  clean_names() %>% 
+  dplyr::select (1,2,4, 5, 8,9) %>% 
+  rename (UOGID = geocode,
+          coc_num = coc_id) 
+
+#Use this format to add any areas to crosswalk as needed
+#  rbind(c("122700", "PPRN Metro Geographies with ESG bounced to state",	"St Cloud City", NA, "129999", "FL-507")) %>%
+#Will also need this to adjust to numeric
+#crosswalk$esg_amount <- as.numeric (crosswalk$esg_amount)
+
+crosswalk %>% 
+  filter (is.na(UOGID))
+```
+
+## Adjusting funding amounts from PPRN amounts to ESG for CDBG/ESG-eligible areas
+This code joins the crosswalk to the PPRN table, filtering out places not in the crosswalk and therefore not in a COC. 
+
+It imports the 362 ESG allocations from 2019 and creates a list of these entitled places to filter out later.
+
+It also reimports a fresh version of the FY19 allocations and calculates the total ESG allocation minus insular areas.
+
+```{r}
+#start with crosswalk, join pprn formula amounts, remove extra columns
+joined <- crosswalk %>%
+  left_join (pprn_df, by = "UOGID") %>% #removes areas without CoCs
+  select (-c(name, state ))
+
+insular <- as.list (c("600001", "660001", "690001", "780001"))
+
+#import ESG19 allocations from HUD to make list of eligible UOGIDs
+hud_funding_19 <- read_excel("data/inputs/hud_allocations/fy2019-formula-allocations-AllGrantees.xlsx", skip = 1) %>%
+  dplyr::select (1, 4, 7) %>%
+  clean_names() %>%
+  rename(UOGID = key) %>%
+  mutate (UOGID = if_else (sta == "DC", "110006", UOGID)) %>%
+  filter (esg19 != 0) %>% #finds only ESG eligible
+  filter (!(UOGID %in% (c("600001", "660001", "690001", "780001")))) %>%
+  filter (!(UOGID != "119999" & str_detect (UOGID, "9999$"))) #removes states, which are nonentitlement and makes sure DC stays in as entitlement
+
+esg_eligible18 <- as.list (hud_funding_19$UOGID)
+
+#import ESG19 allocations from HUD to calculate total allocation
+hud_funding_19 <- read_excel("data/inputs/hud_allocations/fy2019-formula-allocations-AllGrantees.xlsx", skip = 1) %>%
+  dplyr::select (1, 7) %>%
+  clean_names() %>%
+  rename(UOGID = key)
+
+#Calculate total ESG-entitled allocation
+esg19_total <- sum (hud_funding_19$esg19) * .998
+```
+
+## Calculating ESG/CDBG entitled areas from CDBG18
+This imports the CDBG18 calculations worksheet from HUD and calculates a total allocation amount. 
+
+We need this because the ESG formula uses the proportion of an area's CDBG funding to the whole to adjust into the smaller ESG allocation.
+
+An area's ESG funding = (CDBG18 / CDBG18 total-insular area setaside) * (total 2019 ESG allocation - insular area setaside)
+
+This filters the CDBG calculation worksheet for all ESG-eligible areas using the list we made above. We can then sum these areas to see much total CDBG funding HUD allocated to ESG-entitled areas and how much to the non-entitled areas.
+```{r}
+cdbg18_allocation <- read_excel ("data/inputs/hud_calculations/CDBG FY19.xlsx", sheet = "CDBG18") %>% 
+  rename (UOGID = HUDKEY,
+          cdbg18 = "FY18 Formula") %>% 
+  dplyr::select (UOGID, NAME, cdbg18) 
+
+#calculate total 2018 CDBG formula allocations
+cdbg18_total <- sum (cdbg18_allocation$cdbg18)
+
+#filter out nonentitled areas to calculate total CDBG to ESG-entitled places and total CDBG to non-entitled places
+cdbg18_entitled <- cdbg18_allocation %>% 
+  filter (UOGID %in% esg_eligible18) %>%   
+  filter (!(UOGID == insular))
+#  rbind (c("369119", "Westchester County", 3544891)) #Westchester became CDBG/ESG-eligible in 2019, it's missing from allocation sheet. This adds its 2019 amount or else it would appear as NA.
+
+#check DC is here
+cdbg18_entitled %>% 
+  filter (UOGID %in% c("110006", "119999"))
+
+#check that insular areas are not in this list
+cdbg18_entitled %>% 
+  filter (UOGID %in% c("600001", "660001", "690001", "780001"))
+
+cdbg18_nonentitled <- cdbg18_allocation %>% 
+  filter (!(UOGID %in% esg_eligible18)) 
+
+#cdbg18_entitled$cdbg18 <- as.numeric (cdbg18_entitled$cdbg18)
+cdbg18_esg_amt <- sum(cdbg18_entitled$cdbg18)
+
+cdbg18_non_amt <- sum(cdbg18_nonentitled$cdbg18)
+cdbg18_non_amt2 <- (cdbg18_total) - cdbg18_esg_amt #take out insular adjustment because they're already not included
+```
+
+Now we can convert the CDBG allocations to the ESG amounts for CDBG-eligible and ESG-eligible places. This adds our PPRN data and crosswalk into the CDBG18 allocation data and filters out extra state nonentitlements that get pulled in from the right join.
+
+I can also compare my calculations to HUDs to check for accuracy.
+
+```{r}
+#calculate the proportion of each area's portion of the whole allocation.
+#multiply that by the total ESG amount to adjust to the proper ESG amount
+entitled_funding <- joined %>% 
+  right_join (cdbg18_allocation, by="UOGID") %>% 
+  select (-NAME) %>%
+  filter (!(str_detect(UOGID,"9999$"))) #filters out state nonentitlements that get pulled in from right join
+
+entitled_funding2 <- entitled_funding%>%
+  mutate (pct = cdbg18 / cdbg18_total, #proportion of area to the whole allocation
+          esg19 = round(pct * esg19_total), #adjusts into smaller ESG amount
+          diff = esg19 - esg_amount, #how far off am I from HUD's calculations in the crosswalk?
+          pct_diff = abs(diff / esg_amount )) 
+          
+#0.046% mean difference from HUD's numbers in the crosswalk to these.
+mean(entitled_funding2$pct_diff, na.rm=T)
+```
+
+## Adjusting non-entitled areas from PPRN amounts
+HUD's calculations show the state nonentitlement areas as one lump sum, so we can't simply convert it. This section translates the PPRN funding amount back into its approximate CDBG18 amount and then over to the ESG19 amount to be used only for nonentitlement areas.
+
+## Calculate PPRN totals and save values
+Sum up all PPRN Formula amounts to get total. 
+Subtract amounts for insular areas since HUD sets aside .2% for them.
+Set the proper allocation amounts according to the PPRN formula: ESG entitled areas get 75% and nonentitled ESG areas get 25%.
+```{r}
+#from HUD's allocation files
+pprn_total_with_insular <- sum(pprn_df$pprn)
+#subtract setasides
+pprn_total <- pprn_total_with_insular * .998
+
+pprn_esgs <- pprn_total * .75
+pprn_non <- pprn_total * .25
+```
+
+We need to filter our joined crosswalk/PPRN data for for all non-entitled areas. These are counties in the Balance of State areas that end in "9999". They also have geo_type marker.
+
+This calculates the proportion each county's PPRN constitutes of all nonentitlement PPRN funding. We can then multiply that by the total CDBG funding allocated to nonentitlement areas to convert it into an approximate CDBG amount. 
+
+We then repeat the process above of calculating each area's amount of the whole CDBG18 allocation and multiply that by the ESG19 total allocation to arrive at the area's approximate ESG funding amount. 
+
+This is not a perfect estimate, likely due to reallocations after the formula is calculated, joint agreements between cities and counties or some other reason. There is a large outlier -- Bibb County, GA. When that county is factored out, the mean difference from HUD's calculations to these is 7%. Not perfect, but far better than the 20% difference my QGIS analysis provided. 
+
+However, once these are all grouped by ESG/COC, the difference drops significantly. I'm guessing most places with differences are in the same ESG and get swept up together.
+```{r}
+#NONENTITLED AREAS - should total 2942
+nonentitled_funding <- joined %>%
+  filter (str_detect (esg_id, "9999$")) %>%
+  filter (geo_type == "PPRN Non-Entitlement Geographies with ESG bounced to State") %>% 
+  rbind (c("369119", "PPRN Non-Entitlement Geographies with ESG bounced to State", "Westchester County", 529089, 369119, "NY-604", 1678341)) #Westchester became CDBG/ESG-eligible in 2019, so it's missing from allocation sheet and its esg_id is not the state level code 369999. This manually adds it back in.
+nonentitled_funding$pprn <- as.numeric (nonentitled_funding$pprn)
+nonentitled_funding$esg_amount <- as.numeric (nonentitled_funding$esg_amount)
+
+nonentitled_funding_unadjusted <- nonentitled_funding %>%
+  mutate (pct = pprn / pprn_non,
+          cdbg18 = pct * (cdbg18_non_amt),
+          esg19 = round((cdbg18 / cdbg18_total ) * esg19_total),
+          diff = esg19 - esg_amount,
+          pct_diff = (diff / esg_amount * 100)) 
+
+#All percent differences vary from 4.7 - 5.3%.
+adj <- mean(nonentitled_funding_unadjusted$pct_diff, na.rm=T)
+pprn_adj <- (100-adj) / 100
+
+nonentitled_funding2 <- nonentitled_funding %>%
+  mutate (pct = pprn / pprn_non,
+          cdbg18 = pct * (cdbg18_non_amt),
+          esg19 = round(((cdbg18 / cdbg18_total ) * esg19_total) * pprn_adj),
+          diff = (esg19 - esg_amount),
+          pct_diff = abs(diff / esg_amount)) 
+
+#0.192696% mean difference from HUD's numbers in the crosswalk to these.
+mean(nonentitled_funding2$pct_diff, na.rm=T)
+#str(nonentitled_funding3)
+```
+
+#Bring it together
+Join ESG/CDBGs and nonentitlement areas back together and check for errors
+```{r}
+crosswalk18 <- entitled_funding2 %>%
+  rbind(nonentitled_funding2) %>%
+  rename (x18_hud_calc = esg_amount)
+
+#Any non matching amounts from the 2020 crosswalk's ESG amounts to my calculated amounts? It's the nonentitlement areas, not surprisingly.
+crosswalk18 %>%
+  filter (x18_hud_calc != esg19)
+
+#Anything extra that's gotten joined? UOGIDs of areas without COCS + Hawaii counties, which are actually calculated under the UOGID from the crosswalk (159### rather than 15000#)
+anti_join(crosswalk18, crosswalk, by="UOGID")
+
+#0.13694% mean difference from HUD's numbers in the crosswalk to these.
+mean(crosswalk18$pct_diff, na.rm=T)
+
+write.csv (crosswalk18, "data/outputs/disaggregated_crosswalk_check.csv")
+```
+
+## Create crosswalk
+Now that we've got the funding amounts for each little area, we can group into 654 unique ESG-CoC combinations and calculate how much ESG funding the portions of each CoC within a particular ESG's boundaries receive.
+
+```{r}
+#Areas without COC will aggregate into a new NA column that appears in the final crosswalk so we'll remove those.
+#How many? 
+crosswalk18 %>%
+  filter (is.na (coc_num))
+
+#10 rows that we'll filter out here, group by ESG and COC then summarize.
+group1 <- crosswalk18 %>%
+  filter (!is.na (coc_num)) %>%
+  group_by (esg_id, coc_num) %>%
+  summarize (esg_4_coc_n_esg = sum(esg19, na.rm=T)) %>%
+  ungroup() 
+
+#Import ESG crosswalk from HUD to compare
+crosswalk_esg <- read_excel("data/inputs/hud_calculations/Aggregated COC to ESG crosswalk.xlsx") %>%
+  clean_names() %>%
+  rename (coc_num = coc_id)
+
+#Check -- these amounts should match column D in aggregated crosswalk
+check_group1 <- group1 %>%
+  full_join (crosswalk_esg, by = c("esg_id", "coc_num")) %>% 
+  dplyr::select (1,2,3,5) %>%
+  rename (hud_amt = amount_of_esg_for_the_portion_of_coc_in_this_esg_grantee) %>%
+  mutate (diff = esg_4_coc_n_esg - hud_amt,
+          pct_diff = abs(diff / hud_amt * 100))
+
+#Avg difference of 0.06%
+mean(check_group1$pct_diff) 
+```
+
+Group by CoC number to calculate the total ESG funding for each CoC. Divide summed ESG funding for each portion of the CoC within an ESG's boundaries by the CoC's total ESG funding to calculate the share of each CoC's homeless population that resides within this part of the ESG area. 
+```{r}
+group2 <- group1 %>% 
+  group_by (coc_num) %>% 
+  mutate (tot_esg_4_coc = sum(esg_4_coc_n_esg, na.rm=T), #calculates total ESG funding for each CoC
+          share_coc_n_esg = esg_4_coc_n_esg / tot_esg_4_coc) #calculates share of each CoC within this part of the ESG area. 
+  
+#Check my calculated ESG funding adds up to approximately the FY2019 ESG allocation of $279,687,680. Will be different because of all the going between geographies, and should be slightly less because areas without COCs are removed.
+sum(group2$esg_4_coc_n_esg, na.rm=T) 
+```
+
+Compare with HUD's crosswalk to see how close I got. 
+```{r}
+#Import ESG crosswalk from HUD
+crosswalk_esg <- read_excel("data/inputs/hud_calculations/Aggregated COC to ESG crosswalk.xlsx") %>%
+  clean_names() %>%
+  dplyr::select (1,2,6) %>%
+  rename (coc_num = coc_id)
+
+#Join my share calculations by both ESG and CoC to compare my shares based on population to HUD's share calculations
+compare_shares <- crosswalk_esg %>%
+  full_join (group2, by = c("esg_id", "coc_num")) %>%
+  rename (hud_share = share_of_coc_in_this_part_of_esg_area,
+          my_share = share_coc_n_esg) %>% # add my_share2010 column to compare to current HUD share to see which might be more wrong
+  mutate (diff = abs(hud_share - my_share)) %>%
+  dplyr::select(1,2,3,6,7) 
+
+#How far off are my calculated shares from HUD's on average?
+mean (compare_shares$diff, na.rm=T) #avg diff = 0.005998% from my calculations to HUDs
+
+#Strip out HUD's share and difference column for previous year's crosswalks 
+esg_coc_crosswalk <- compare_shares %>%
+  dplyr::select (1, 2, 4) %>%
+  rename (share_of_coc_in_this_part_of_esg_area = my_share)
+
+#Export for use in formula program
+write.csv (compare_shares, "data/outputs/x20_simple_shares.csv")
+```
+
+```{r}
+#Comparing my calculations to HUD's
+#247 were dead-on (perfect matches) leaving 407 calculations different from HUD's
+compare_shares %>% 
+  filter (diff == 0)  %>% count()
+
+# 581/654 = 88.8% were within 2 percentage points of HUD's calculations
+compare_shares %>% 
+  filter (diff < .02) %>% count()
+
+# 540/654 = 82.6% were within 1 percentage point of HUD's calculations
+compare_shares %>% 
+  filter (diff < .01) %>% count()
+
+#633/654 = 96.8%were within 5 percentage points of HUD's calculations
+compare_shares %>% 
+  filter (diff < .05) %>% count()
+
+#247 / 654 ESG-CoC combinations match perfectly ~ over one-third. 
+#grouping them by ESG and counting gets 101/358 ESGs (minus insular areas) that match perfectly (28%)
+compare_shares %>% 
+  filter (diff == 0) %>% 
+  group_by(esg_id) %>%
+  count()
+
+all_tracts_pop6 %>% 
+  summarize (n(), n_distinct(cross_uogid))
+
+#What CDBG-eligible cities/urban counties were off? 
+check_pop_8 %>%
+  filter (diff != 0) %>%
+  filter (!str_detect(esg_id, "9999$"))
+#It's all the places that changed eligibility + NYC
+
+#How many COCs perfectly match ESG boundaries?
+#Group by ESG and count
+#Group by COC and count
+#Look for those places that only have a single row for each
+matches <- compare_shares %>% 
+#  filter (hud_share == 1) %>% 
+  group_by (esg_id) %>% 
+  mutate (n_esg = n()) %>%
+  ungroup() %>%
+  group_by(coc_num)%>% 
+  mutate (n_coc = n()) %>%
+  filter (n_esg == 1 & n_coc == 1)
+
+matches_final <- matches %>% 
+  left_join (crosswalk, by = c("esg_id"="UOGID")) %>% 
+  left_join (pit_2019, by = c("coc_num.x" ="coc_num") ) %>%
+  select (coc_num.x, esg_id, geo_name, coc_name)
+
+write.csv (matches_final, "data/outputs/coc_esg_perfect_matches.csv")
+
+```

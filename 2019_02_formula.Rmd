@@ -1,0 +1,522 @@
+---
+title: "02_Recreating HUD's ESG-CV2 formula"
+author: "Austin Fast"
+date: "11/22/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidycensus)
+library(readxl)
+library(janitor)
+```
+
+## Goal 
+Calculate ESG-CV2 allocations using crosswalk constructed in 01_2020_shares and data gathered in QGIS.
+
+## Sources 
+* 2015 TIGER/Line Place Shapefiles, from Census Bureau:
+https://www2.census.gov/geo/tiger/TIGER2016/PLACE/
+* 2015 TIGER/Line County Subdivision Shapefiles, from Census Bureau:
+https://www2.census.gov/geo/tiger/TIGER2016/COUSUB/
+* 2011-2015 ACS total population (B01003) at Census summary level 070, from SocialExplorer.org
+* 2011-2015 CHAS data downloaded at summary level 070
+https://www.huduser.gov/portal/datasets/cp.html
+* 2017 CDBG HUD allocations
+https://www.hud.gov/program_offices/comm_planning/budget/fy17/
+* 2018 ESG HUD allocations
+https://www.hud.gov/program_offices/comm_planning/budget/fy18/
+* Aggregated COC to ESG crosswalk (emailed from HUD)
+* Disaggregated COC to ESG crosswalk (emailed from HUD)
+* 2018 PIT count
+https://www.hudexchange.info/resource/3031/pit-and-hic-data-since-2007/
+* 2019 Fair Market Rents
+https://www.huduser.gov/portal/datasets/fmr.html
+
+## Gather ACS and CHAS data 
+This code shows how I import the 2011-2015 ACS population data and combine the component parts making up two 2011-2015 CHAS variables used in the ESG-CV2 formula.
+
+HUD combined the following 14 variables at the 070 level to calculate an areas's number of very low-income renters at risk for homelessness:
+* t3_est47 (Renter occupied, lacking complete plumbing or kitchen facilities, <=30% of HAMFI)
+* t3_est48 (Renter occupied, lacking complete plumbing or kitchen facilities, 30-50% of HAMFI)
+* t3_est53 (Renter occupied, with more than 1.5 persons per room, none of the needs above, <=30% of HAMFI)
+* t3_est54 (Renter occupied, with more than 1.5 persons per room, none of the needs above, 30-50% of HAMFI)
+* t3_est59 (Renter occupied, with 1-1.5 persons per room, none of the needs above, <=30% of HAMFI)
+* t3_est60 (Renter occupied, with 1-1.5 persons per room, none of the needs above, 30-50% of HAMFI)
+* t3_est65 (Renter occupied, with housing cost burden >50%, none of the needs above, <=30% of HAMFI)
+* t3_est66 (Renter occupied, with housing cost burden >50%, none of the needs above, 30-50% of HAMFI)
+* t3_est71 (Renter occupied, with housing cost burden 30%-50%, none of the needs above, <=30% of HAMFI)
+* t3_est72 (Renter occupied, with housing cost burden 30%-50%, none of the needs above, 30-50% of HAMFI)
+* t3_est77 (Renter occupied	housing cost burden not computed, none of the needs above, <=30% of HAMFI)
+* t3_est78 (Renter occupied	housing cost burden not computed, none of the needs above, 30-50% of HAMFI)
+* t3_est83 (Renter occupied, has none of the 4 housing problems, <=30% of HAMFI)
+* t3_est84 (Renter occupied, has none of the 4 housing problems, 30-50% of HAMFI)
+
+HUD combined the following 6 variables at the 070 level to calculate an areas's number of very low-income renters at risk for unsheltered homelessness:
+* t3_est47 (Renter occupied,	lacking complete plumbing or kitchen facilities, <=30% of HAMFI)
+* t3_est48 (Renter occupied, lacking complete plumbing or kitchen facilities, 30-50% of HAMFI)
+* t3_est53 (Renter occupied, with more than 1.5 persons per room, none of the needs above, <=30% of HAMFI)
+* t3_est54 (Renter occupied, with more than 1.5 persons per room, none of the needs above, 30-50% of HAMFI)
+* t3_est59 (Renter occupied, with 1-1.5 persons per room, none of the needs above, <=30% of HAMFI)
+* t3_est60 (Renter occupied, with 1-1.5 persons per room, none of the needs above, 30-50% of HAMFI)
+
+```{r}
+#Import 2011-2015 ACS population data from SocialExplorer.org
+pop <- read_csv("data/inputs/070-pop-2015.csv") %>%
+#  mutate (Geo_PLACESE = as.character(Geo_PLACESE),
+#          ACS09_5yr_B01003001 = as.character(ACS09_5yr_B01003001))%>%
+  rename (GEOID = Geo_PLACESE,
+          name = Geo_NAME,
+          pop = ACS15_5yr_B01003001) %>%
+  dplyr::select (Geo_GEOID, name, pop)
+    
+#Import CHAS variables confirmed by HUD
+chas <- read_csv ("data/inputs/2011thru2015-070-csv/Table3.csv") %>% 
+  clean_names() %>%
+  dplyr::select (geoid, t3_est47, t3_est48, t3_est53, t3_est54, t3_est59, t3_est60, t3_est45, t3_est65, t3_est66, t3_est71, t3_est72, t3_est77, t3_est78, t3_est83, t3_est84) %>%
+  mutate (
+    vli_renters = (t3_est47 + t3_est48 + t3_est53 + t3_est54 + t3_est59 + t3_est60 + t3_est65 + t3_est66 + t3_est71 + t3_est72 + t3_est77 + t3_est78 + t3_est83 + t3_est84),
+    vli_crowd = (t3_est47 + t3_est48 + t3_est53 + t3_est54 + t3_est59 + t3_est60)) %>%
+  dplyr::select (geoid, vli_renters, vli_crowd) %>% 
+  rename (Geo_GEOID = geoid)
+
+#Join together
+sl070_2019 <- pop %>%
+  full_join(chas, by="Geo_GEOID")
+
+#Export to add into shapefile in QGIS
+write.csv (sl070_2019, "data/FY2019/sl070_2019.csv")
+```
+
+#QGIS analysis
+In QGIS, overlaying the 2015 place and county subdivision shapefiles produces a shapefile that matches the places and place remainders of summary level 070. 
+
+After joining together the population and CHAS data above, I joined it to the shapefile using the 22-digit unique identifier Geo_GEOID. I created this field in QGIS using the following expression in the field calculator:
+
+CASE 
+WHEN "STATEFP" IS NULL THEN 
+concat ('07000US' + "STATEFP_2" + "COUNTYFP"+ "COUSUBFP" + '99999')
+ELSE concat ('07000US' + "STATEFP_2" + "COUNTYFP" + "COUSUBFP" + "PLACEFP")
+END
+
+All county subdivisions in the overlaid file that don't have a matching place when overlaid will have a null State FIPS code. These are the "Remainder of" areas, whose Geo_GEOIDs all end with "99999." Otherwise, the Geo_GEOID is simply a concatenation of "07000US", the state FIPS code, county FIPS code, county subdivision FIPS code and place FIPS code.
+
+## Areal interpolation of population data
+Following [this methodology available from Yale](http://www.library.yale.edu/MapColl/files/docs/Overlay%20of%20Demographic%20Datasets%20with%20Unlike%20Boundaries.pdf), I used areal weighting to adjust population data from the SL070 level into the overlaid ESG geography. It's important to note demography is not necessarily uniformly distributed across geographic entities so this will not provide perfect results.
+
+#This describes 2020 analysis, but was repeated for all previous years.
+1. I calculated the area of each SL070 polygon with the expression "$area" in the QGIS field calculator.
+2. I then overlaid that SL070 shapefile with the FY2020 ESG shapefile (362 jurisdictions). The resulting shapefile has 78,674 areas.
+3. I calculated the area of these new overlaid polygons in QGIS.
+4. I calculated the proportion of the overlaid polygons that fall within the original SL070 geography using this expression in QGIS: round ("overlay_ar" / "sl070_area", 5)
+5. 5,248 of these overlaid polygons have an area_prop of 0, meaning they're slivers caused by slight mismatches in borders between the SL070 and ESG shapefiles. Removing these reduces the total number of affected polygons to 73,426.
+5. 6,511 of 73,426 polygons have a proportion less than 1, meaning areal weighting might cause slight inaccuracies in 9% of polygons. That means 91% of polygons will use the exact data from SL070 without weighting.
+
+```{r eval= FALSE} 
+#How many polygons will areal weighting affect? (can only run once you've run subsequent chunks)
+merged_esgs_data %>% 
+  filter (!area_prop == 0) %>% #remove slivers caused by slight mismatches of SL070 & ESG shapefiles
+  filter (area_prop < 1) %>% #look for anywhere the overlaid geography isn't exactly the same as the SL070 geography
+  count() 
+
+6511 / 73426
+```
+
+## Aggregate data into ESG areas
+Import prepared data from QGIS, crosswalks and PIT count, and then clean up by removing unnecessary columns and slivers from QGIS data
+```{r}
+#Import csv from Census summary level 070 data overlaid onto ESG boundaries in QGIS
+merged_esgs_data <- read.csv("data/FY2019/final/merged_intersects_esg.csv", stringsAsFactors = FALSE)
+
+#Change factors from shapefile into numeric to mutate later. 
+merged_esgs_data$sl070_pop <- as.numeric(merged_esgs_data$sl070_pop)
+merged_esgs_data$sl070_vli_ <- as.numeric(merged_esgs_data$sl070_vli_)
+merged_esgs_data$sl070_vl_1 <- as.numeric(merged_esgs_data$sl070_vl_1)
+#Add padding to UOGID to make sure they join properly later. 
+#Add padding to State and County FIPS codes for joining FMRs later.
+merged_esgs_data$UOGID <- str_pad(merged_esgs_data$UOGID, 6, pad = "0")
+merged_esgs_data$STATEFP_2 <- str_pad(merged_esgs_data$STATEFP_2, 2, pad = "0")
+merged_esgs_data$COUNTYFP <- str_pad(merged_esgs_data$COUNTYFP, 3, pad = "0")
+merged_esgs_data$NAMELSAD_2 <- as.character(merged_esgs_data$NAMELSAD_2)
+
+#Updating Louisville pops with 2019 data that didn't match in QGIS
+merged_esgs_data <- merged_esgs_data %>%
+  #Fix Louisville districts that didn't match in QGIS
+  mutate (
+    sl070_pop = case_when (
+    #Louisville Central CCD
+    NAMELSAD_2 == "Louisville Central CCD" ~ 30132,
+    #Louisville West CCD
+    NAMELSAD_2 == "Louisville West CCD" ~ 64555,
+    TRUE ~ sl070_pop),
+    sl070_vli_ = case_when (
+    #Louisville Central CCD
+    NAMELSAD_2 == "Louisville Central CCD" ~ 7975,
+    #Louisville West CCD
+    NAMELSAD_2 == "Louisville West CCD" ~ 10705,
+    TRUE ~ sl070_vli_),
+    sl070_vl_1 = case_when (
+    #Louisville Central CCD
+    NAMELSAD_2 == "Louisville Central CCD" ~ 280,
+    #Louisville West CCD
+    NAMELSAD_2 == "Louisville West CCD" ~ 665,
+    TRUE ~ sl070_vl_1),
+    UOGID = if_else (NAME_3 == "DISTRICT OF COLUMBIA", "119999", UOGID))
+    
+#remove unnecessary columns
+merged_esgs_data <- merged_esgs_data %>%
+  dplyr::select (-c(fid, NAME, PLACENS, LSAD, CLASSFP, PCICBSA, PCINECTA, MTFCC, FUNCSTAT, ALAND, AWATER, INTPTLAT, INTPTLON, COUSUBNS, LSAD_2, CLASSFP_2, MTFCC_2, CNECTAFP, NECTAFP, NCTADVFP, ALAND_2, AWATER_2, INTPTLAT_2, INTPTLON_2, fid_2))
+
+#remove QGIS overlay slivers that could create errors later
+merged_esgs_data <- merged_esgs_data %>%
+  filter (area_prop > 0) 
+
+#looking for edge errors in 2020 QGIS data
+merged_esgs_data %>% 
+  filter (str_detect(sl070_name, "Portland") & STATEFP_2 == "41" & area_prop < 1) %>% 
+  select (sl070_name, sl070_pop, area_prop, NAME_3, Geo_GEOID)
+```  
+   
+## Apply areal weighting to variables
+Multiply population and CHAS variables by their area proportion. 
+```{r}    
+fixed_esgs <- merged_esgs_data %>%
+    mutate (pop_wt = sl070_pop * area_prop,
+    vlirent_wt = sl070_vli_ * area_prop,
+    vliover_wt = sl070_vl_1 * area_prop)
+
+#Check places with area_prop of 1. sl070 variables should be same as pop_wt, so this command should return ~63000 places
+fixed_esgs %>%
+  filter (sl070_pop == pop_wt) %>% 
+  filter (area_prop == 1) %>%
+  dplyr::select (sl070_name, area_prop, sl070_pop, pop_wt )
+```
+
+## Adjust CHAS data to ESG geography
+Group data by ESG area (UOGID) and summarize weighted data for two CHAS variables. 
+```{r}
+esg_vli <- fixed_esgs %>% 
+  group_by (UOGID) %>% 
+  summarize (t_vli_renters = sum(vlirent_wt, na.rm=TRUE), 
+    t_vli_rent_over = sum(vliover_wt, na.rm=TRUE))  
+```
+
+## IMPORT CoC to ESG crosswalk created in simple_shares program to assign homeless counts.
+For 2020, join HUD's crosswalk to add COC match to this data. For previous years, use my calculated crosswalk created in 01_2020_shares.
+Then join 2019 PIT count.
+```{r} 
+#USING MY CROSSWALK FROM SIMPLE_SHARES PROGRAM
+esg_coc_crosswalk <- read.csv("data/outputs/x19_simple_shares.csv") %>%
+  clean_names() 
+esg_coc_crosswalk$esg_id <- str_pad(esg_coc_crosswalk$esg_id, 6, pad = "0")
+esg_coc_crosswalk$coc_num <- as.character(esg_coc_crosswalk$coc_num)
+
+#check for any NAs
+esg_coc_crosswalk %>%
+  filter (is.na(share_of_coc_in_this_part_of_esg_area))
+
+#joining crosswalk to grouped sl070 data
+all_tracts_esg <- esg_vli %>%
+    full_join (esg_coc_crosswalk, by = c("UOGID"="esg_id")) # My crosswalk for earlier years
+```
+
+## Import PIT count and join
+```{r}
+pit_count <- read_excel("data/inputs/hud_calculations/2007-2019-PIT-Counts-by-CoC.xlsx", 
+                       sheet = "2018", 
+                       n_max = 396) %>% #used for csv, stringsAsFactors = FALSE)
+  clean_names %>%
+  dplyr::select (1:2, overall_homeless_2018, unsheltered_homeless_2018) %>%
+  rename(coc_num = co_c_number,
+         coc_name = co_c_name,
+         coc_total_homeless = overall_homeless_2018,
+        coc_unsh_homeless = unsheltered_homeless_2018) %>%
+  mutate(coc_num = ifelse(coc_num == "MO-604a", "MO-604", coc_num))
+
+#join in PIT count
+joined_pit <- all_tracts_esg %>%
+  left_join ( pit_count, by = "coc_num") 
+
+#Any NAs? Will appear for COCs that have disbanded like AR-504, NY-525. Any others could be missing from simple_shares. Go back and fix.
+#Check for disbanded COCs at https://files.hudexchange.info/resources/documents/fy-2018-continuums-of-care-names-and-numbers.pdf
+#https://files.hudexchange.info/resources/documents/fy-2019-continuums-of-care-names-and-numbers.pdf
+joined_pit %>% 
+  filter (is.na (coc_total_homeless))
+joined_pit %>% 
+  filter (is.na (coc_unsh_homeless))
+```
+
+Apply share to PIT count to calculate the homeless count in each of the 654 unique ESG-COC areas.
+```{r}
+joined_pit <- joined_pit %>%
+  mutate (share_homeless = coc_total_homeless * share_of_coc_in_this_part_of_esg_area,
+          share_unsh = coc_unsh_homeless * share_of_coc_in_this_part_of_esg_area)
+
+#Checking homeless totals
+#These will be slightly below actual count because they don't include counts from four insular areas (American Samoa, Guam, Northern Mariana Islands and Virgin Islands)
+sum(joined_pit$share_homeless, na.rm=T)
+sum(joined_pit$share_unsh, na.rm=T)
+#Actual PIT count
+sum(pit_count$coc_total_homeless)
+sum(pit_count$coc_unsh_homeless)
+```
+
+Group by ESG to summarize the unique COC-ESG areas into their proper ESG areas.
+```{r}
+esg_homeless <- joined_pit %>% 
+  group_by (UOGID) %>%
+  summarize (homeless = round(sum(share_homeless, na.rm=T)),
+             unsh = round(sum(share_unsh, na.rm=T)))
+
+#Checking homeless totals
+#These will be slightly below actual count because they don't include four insular areas
+sum(esg_homeless$homeless)
+sum(esg_homeless$unsh)
+#Actual PIT count
+sum(pit_count$coc_total_homeless)
+sum(pit_count$coc_unsh_homeless)
+
+#Any COCs in PIT count that aren't showing up? Need to add manually in 01_simple_shares (other than insular areas)
+anti_join (pit_count, joined_pit, by = "coc_num")
+```
+
+## Adjusting Fair Market Rent geographies into ESG areas
+HUD adjusted each of these variables to take into account local housing and economic circumstances. Specifically, HUD adjusted variables upward to a maximum of 20% to account for places with high housing costs. 
+
+Fair market rent data for FY2020 became available Oct. 1, 2019, at https://www.huduser.gov/portal/datasets/fmr.html?WT.mc_id=Sept192019&WT.tsrc=Email#2020
+
+This code imports the FMR data to prepare it for weighting our variables. We'll match it to our ESG data by county FIPS code. Unfortunately, the six New England states without counties won't match properly, so this code pulls out Connecticut, Maine, Massachusetts, New Hampshire, Rhode Island and Vermont (which conveniently are the only states whose FMR FIPS code end with "99999") and calculates the average of each FMR area's rents to use instead.
+
+The other states all just need to have the "99999" removed from their FIPS code to match up with the rest of our data.
+
+```{r}
+# Applying FMR adjustment obtained from https://www.huduser.gov/portal/datasets/fmr.html?WT.mc_id=Sept192019&WT.tsrc=Email
+#FY2019 data released Oct. 1, 2018  
+fmr <- read_excel("data/inputs/fmr/FY2019_4050_FMRs_rev2.xlsx") %>%
+  dplyr::select (fips2010, fmr_1, areaname) %>%
+  rename (fmr1 = fmr_1)
+
+#Calculate FMR for 6 New England states without counties to match by GEOID_2
+new_england_counties <- fmr %>%
+  filter(!(str_detect(fips2010, "99999"))) %>%
+  #mutate (fips = substr(fips2010, 1, 5)) %>%
+  rename (GEOID_2 = fips2010) %>%
+  dplyr::select (GEOID_2, areaname, fmr1) %>%
+ # distinct(areaname, .keep_all = TRUE) %>%
+  group_by(areaname) %>%
+  mutate (fmr1 = mean(fmr1))#%>%
+  #rename (county_fips = fips)
+  
+#Prepare other states' data to be joined by county FIPS code by removing 9s
+final_fmr <- fmr %>%
+  filter((str_detect(fips2010, "99999"))) %>%
+  mutate (fips = substr(fips2010, 1, 5)) %>%
+  rename(county_fips = fips) %>%
+  dplyr::select (county_fips, areaname, fmr1)
+```
+
+Create county_fips code in our gathered data to pull in FMRs for non-New England states. GEOID_2 column in this data already matches the FMR Area code. This code joins the two dataframes into our full ESG dataframe.
+
+```{r}
+#create county fips code in QGIS sl_070 data for matching FMRs
+fixed_esgs <- fixed_esgs %>% 
+  mutate (county_fips = paste0(STATEFP_2, COUNTYFP)) 
+
+#pad GEOID_2 to ensure proper matching 
+fixed_esgs$GEOID_2 <- str_pad (fixed_esgs$GEOID_2, 10, pad ="0")
+
+#join dataframes
+esg_homeless_fmr <- fixed_esgs %>%
+  full_join (final_fmr, by="county_fips") %>%
+  full_join (new_england_counties, by="GEOID_2") %>%
+#New England's FMRs will be in fmr1.y
+#All other states' FMRs will be in fmr1.x. 
+#This next line combines them into one column.
+  mutate ( fmr1 = if_else (is.na(fmr1.y), fmr1.x, fmr1.y))
+
+#Check for any missed? Should only be 6 areas over water "County subdivisions not defined"
+esg_homeless_fmr %>% 
+  filter (is.na(fmr1))
+
+#Check for FMRs that haven't matched to the ESG data. Should be Samoa, Guam, Mariana Islands and Virgin Islands. Also a St. Louis area county that doesn't actually exist (29056)
+esg_homeless_fmr %>% 
+  filter (is.na(UOGID))
+```
+
+This code groups by ESG to calculates an average FMR for each ESG area. I also tried a weighted mean, weighted by population of each little unit of area, but that resulted in a bigger percent difference from HUD's calculations at the end.
+
+This also removes those areas without an FMR we found above to prevent errors later.
+```{r}
+esg_homeless_fmr <- esg_homeless_fmr %>%
+  group_by (UOGID) %>%
+  summarize (#esg_fmr = mean (fmr1, na.rm = T),
+             esg_fmr = weighted.mean(fmr1, pop_wt, na.rm=T)) %>% 
+  filter (!is.na(UOGID)) #breaks weighted mean otherwise
+
+#Check for any missed? Should only be 0.
+esg_homeless_fmr %>% 
+  filter (is.na(esg_fmr))
+```
+
+## Finally! Join Homeless counts, CHAS data and FMR to ESG geography. 
+It should result in dataframe of 358 places that got ESG funding in 2020, minus four insular areas.
+```{r} 
+unadj_data2 <- full_join (esg_homeless, esg_vli, by="UOGID") %>%
+  full_join (esg_homeless_fmr, by ="UOGID") 
+```
+
+## Weighting variables based on FMR
+
+Here's where the weighting of variables by fair market rent comes into play. HUD calculated the national average of one-bedroom fair market rent (weighted on each of the four variables from the CARES Act formula) and then increased a community’s value by that percentage. 
+
+For example, a city whose fair market rent was 10% above the national average when weighted by total homeless count would have the value of its total homeless count increased by 10% before calculating its share of the total homeless count overall. Nonentitlement areas were all calculated using unadjusted counts, and no data was adjusted downward. Increases were capped at 20% to lessen the impact of high-cost outliers. 
+
+This code adds the four weighted averages to our dataframe.
+```{r}
+weighted_data1 <- unadj_data2 %>%             
+  mutate (homeless_fmr_adj = weighted.mean(esg_fmr, homeless, na.rm=T),
+          unsh_fmr_adj = weighted.mean(esg_fmr, unsh, na.rm=T),
+          vli_fmr_adj = weighted.mean(esg_fmr, t_vli_renters, na.rm=T),
+          vli_over_fmr_adj = weighted.mean(esg_fmr, t_vli_rent_over, na.rm=T)
+          )
+```
+
+This code mimics the SPSS code HUD sent me showing how they calculate the percentage to adjust variables from the correct weighted national average. They simply divide the area's FMR by the national weighted average.
+```{r}
+weighted_data2 <- weighted_data1 %>%  
+  mutate (homeless_adj = (esg_fmr / homeless_fmr_adj),
+          unsh_adj = (esg_fmr / unsh_fmr_adj),
+          vli_adj = (esg_fmr / vli_fmr_adj),
+          vli_over_adj = (esg_fmr / vli_over_fmr_adj))  
+```
+
+This code selects entitlement areas only (those whose UOGIDs do not end with "9999") and calculates a multiple for all areas' variables. This allows for adjusting areas with higher-than-average FMRs upward by that multiple, capping adjustments at 20%.
+* Areas whose FMR is at or below the national weighted average get a multiple of 1.  
+* Areas whose FMR is more than 20% over the national weighted average get a multiple of 1.2.  
+* Areas whose FMR is 0-20% over the national weighted average get a multiple matching that percent.
+```{r}
+weighted_data3 <- weighted_data2 %>%
+  mutate (adj_homeless = case_when(
+    (!str_detect(UOGID, "9999$")) & between(homeless_adj, 1, 1.20) ~ homeless_adj,
+    (!str_detect(UOGID, "9999$")) & between(homeless_adj, 0, 1) ~ 1,
+    (!str_detect(UOGID, "9999$")) & between(homeless_adj, 1.2, 100) ~ 1.2),
+          adj_homeless = replace_na(adj_homeless, 1)
+    ) %>%
+  mutate (adj_unsh = case_when(
+    (!str_detect(UOGID, "9999$")) & between(unsh_adj, 1, 1.20) ~ unsh_adj,
+    (!str_detect(UOGID, "9999$")) & between(unsh_adj, 0, 1) ~ 1,
+    (!str_detect(UOGID, "9999$")) & between(unsh_adj, 1.2, 100) ~ 1.2),
+          adj_unsh = replace_na(adj_unsh, 1)
+    ) %>%  
+  mutate (adj_vli = case_when(
+    (!str_detect(UOGID, "9999$")) & between(vli_adj, 1, 1.20) ~ vli_adj,
+    (!str_detect(UOGID, "9999$")) & between(vli_adj, 0, 1) ~ 1,
+    (!str_detect(UOGID, "9999$")) & between(vli_adj, 1.2, 100) ~ 1.2),
+          adj_vli = replace_na(adj_vli, 1)
+    ) %>%  
+  mutate (adj_vli_over = case_when(
+    (!str_detect(UOGID, "9999$")) & between(vli_over_adj, 1, 1.20) ~ vli_over_adj,
+    (!str_detect(UOGID, "9999$")) & between(vli_over_adj, 0, 1) ~ 1,
+    (!str_detect(UOGID, "9999$")) & between(vli_over_adj, 1.2, 100) ~ 1.2),
+          adj_vli_over = replace_na(adj_vli_over, 1)
+    ) 
+```
+
+This code applies the multiple calculated in the previous step to all variables' values and removes unnecessary columns.
+```{r}
+weighted_data4 <- weighted_data3 %>%
+  mutate (final_homeless = homeless * adj_homeless,
+          final_unsh = unsh * adj_unsh,
+          final_vli = t_vli_renters * adj_vli,
+          final_vli_over = t_vli_rent_over * adj_vli_over
+          ) 
+
+#check for places that got adjusted upward for homeless count. esg_fmr should be > homeless_fmr_adj
+weighted_data4 %>% 
+  filter (adj_homeless > 1) %>% 
+  dplyr::select (1,2,6,7, 11,15, 19)
+
+#reduce extra columns for final dataframe with all data, weighted by FMR, joined to ESG areas
+weighted_data5 <- weighted_data4 %>% 
+  dplyr::select (1, 19:22)
+```
+
+## Calculating shares of ESG-CV2
+HUD then summed the adjusted counts for all recipients to get a national total for each variable. American Samoa, Guam, the Northern Mariana Islands and the Virgin Islands do not all have PIT counts and CHAS data available, so HUD set aside 0.2% of the funding and allocated it by population to these four areas.
+
+The following formula shows the final calculation to determine the amount each ESG area receives: 
+Allocation amount ($2.954 billion [removes 0.2% for insular areas]) X
+0.5 * (area’s adjusted count of total homeless / national sum of adjusted total homeless counts)
+0.1 * (area’s adjusted count of unsheltered homeless / national sum of adjusted unsheltered homeless counts)
+0.15 * (area’s adjusted count of very low-income renters / national sum of adjusted very low-income renters)
+0.25 * (area’s adjusted count of very low-income renters living in overcrowded conditions or without full kitchen and plumbing / national sum of adjusted very low-income renters overcrowded or without full kitchen and plumbing)
+
+Calculate national totals of each variable and set the allocation amount to match ESG-CV2's funding minus insular areas. Then plug values into formula above to calculate shares for each ESG area.
+```{r}
+#Calculating national totals for ESG19
+nat_homeless <- sum (weighted_data5$final_homeless, na.rm=T)
+nat_unsh <- sum (weighted_data5$final_unsh, na.rm=T)
+nat_vli <- sum (weighted_data5$final_vli, na.rm=T)
+nat_vli_over <- sum (weighted_data5$final_vli_over, na.rm=T)
+
+#Calculating shares of ESG19
+amt <- 279440000 #$280M - $560K to insular areas (.2%)
+
+shares3 <- weighted_data5 %>%
+  mutate ( final_vli = replace_na ( final_vli, 1),
+           final_vli_over = replace_na ( final_vli_over, 1),
+           share = 
+             (amt * ((0.50 * final_homeless / nat_homeless) + 
+                       (0.10 * final_unsh / nat_unsh) + 
+                       (0.15 * final_vli / nat_vli) +
+                       (0.25 * final_vli_over / nat_vli_over)
+             ))
+  )
+
+#Check matches back to ESG19 total of $279M
+sum(shares3$share, na.rm=T)
+```
+
+## Comparing to actual allocation
+Import HUD's actual 2019 allocations to compare how my formula has done. 
+```{r}
+#Import HUD ESG19 for comparison
+hud_funding <- read_excel("data/inputs/hud_allocations/fy2019-formula-allocations-AllGrantees.xlsx", skip = 1) %>% 
+  clean_names() %>%
+  dplyr::select (key, name, esg19) %>% 
+  rename(uogid = key) %>%
+  filter(esg19 != 0) 
+
+#Check for any missing -- should only be 4 insular areas
+anti_join (hud_funding, shares3, by= c("uogid" = "UOGID"))
+
+cutoff_amt <- 280000000 * .0005
+#Calculate those places below 0.05% cutoff and rollup their shares into state non-entitlement regions
+compare19 <- shares3 %>%
+  full_join (hud_funding, by = c("UOGID" = "uogid")) %>%
+  mutate (formula_diff = (share - esg19),
+          pct_diff = ((formula_diff / esg19)*100),
+          state = str_sub(UOGID, 1, 2)) %>%
+  rename (my_formula = share,
+          allocation = esg19) %>%
+  dplyr::select (1,7,6,8:11) %>%
+  mutate (cutoff = if_else (my_formula < cutoff_amt, 0, my_formula)) %>%
+  #filter (!str_detect(UOGID, "9999$")) %>%
+  group_by (state) %>%
+  mutate (st_tot = sum (my_formula),
+          missing = sum (cutoff),
+          roll_up = st_tot - missing,
+          rolled_up = if_else (str_detect(UOGID, "9999$"), my_formula + roll_up, cutoff),
+          pct_diff_rollup = ((rolled_up - allocation) / allocation)*100) %>%
+  ungroup() %>%
+  dplyr::select (-c(7:11)) %>%
+  mutate (my_formula = round (my_formula),
+          formula_diff = round (formula_diff),
+          pct_diff = round (pct_diff, digits = 2),
+          rolled_up = round (rolled_up),
+          pct_diff_rollup = round (pct_diff_rollup, digits = 2))
+
+write.csv (compare19, "data/outputs/simpleshare_final/compare19_simpleshares.csv")
+```
